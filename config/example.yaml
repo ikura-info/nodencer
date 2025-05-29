@@ -1,0 +1,13 @@
+mainnet:
+  - https://eth.llamarpc.com/
+  - https://1rpc.io/eth
+  - https://rpc.flashbots.net/fast
+  - http://localhost:8001 # for testing failure
+gnosis:
+  - https://rpc.gnosischain.com/
+  - https://gnosis.drpc.org/
+  - https://gnosis.oat.farm/
+  - http://localhost:8002 # for testing failure
+testnet:
+  - https://goerli.gateway.tenderly.co/ # Example of a path in the backend URL
+  - https://rpc.ankr.com/eth_goerli/
