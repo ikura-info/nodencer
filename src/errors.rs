@@ -17,6 +17,7 @@ pub enum ProxyError {
     MissingHostHeader,
     RequestBodyTooLarge, // Or BodyReadError
     ClientIpParseError,
+    DecompressionFailed,
 }
 
 impl fmt::Display for ProxyError {
@@ -35,6 +36,7 @@ impl fmt::Display for ProxyError {
             ProxyError::MissingHostHeader => write!(f, "Missing Host header"),
             ProxyError::RequestBodyTooLarge => write!(f, "Request body too large or error reading body"),
             ProxyError::ClientIpParseError => write!(f, "Could not parse client IP"),
+            ProxyError::DecompressionFailed => write!(f, "Decompression failed"),
         }
     }
 }
@@ -98,6 +100,7 @@ pub fn error_to_response(err: &ProxyError) -> Response<Full<Bytes>> {
         ProxyError::MissingHostHeader => StatusCode::BAD_REQUEST,
         ProxyError::RequestBodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         ProxyError::ClientIpParseError => StatusCode::INTERNAL_SERVER_ERROR,
+        ProxyError::DecompressionFailed => StatusCode::BAD_REQUEST,
     };
 
     let mut response = Response::builder()

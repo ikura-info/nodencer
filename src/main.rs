@@ -25,6 +25,9 @@ use dashmap::DashMap;
 use rand::Rng;
 use url::Url;
 
+use flate2::read::GzDecoder;
+use std::io::Read;
+
 use eyre::{Result, bail};
 use tracing::{info, warn, error, debug};
 
@@ -63,8 +66,9 @@ async fn handle_request(
 
     let body_bytes = req.into_body().collect().await.map_err(ProxyError::Hyper)?.to_bytes();
 
-    if method == hyper::Method::POST {
-        debug!(request_id = request_id, request_body = ?body_bytes);
+    if tracing::enabled!(tracing::Level::DEBUG) && method == hyper::Method::POST {
+        let body_string = String::from_utf8_lossy(&body_bytes);
+        debug!(request_id = request_id, request_body = %body_string, ">>>");
     }
 
     let client_ip = remote_addr.ip();
@@ -112,10 +116,33 @@ async fn handle_request(
         match state.client.request(backend_req).await {
             Ok(response) => {
                 let response_status = response.status();
+                let (mut parts, body) = response.into_parts();
+                let response_body_bytes = body.collect().await.map_err(ProxyError::Hyper)?.to_bytes();
+
+                // Only decompress for logging if debug is enabled, preserve original response
+                if tracing::enabled!(tracing::Level::DEBUG) && method == hyper::Method::POST {
+                    let log_body_bytes = if let Some(content_encoding) = parts.headers.get(hyper::header::CONTENT_ENCODING) {
+                        if content_encoding == "gzip" {
+                            let mut decoder = GzDecoder::new(&response_body_bytes[..]);
+                            let mut decompressed = Vec::new();
+                            if decoder.read_to_end(&mut decompressed).is_ok() {
+                                Bytes::from(decompressed)
+                            } else {
+                                // If decompression fails, use original bytes
+                                response_body_bytes.clone()
+                            }
+                        } else {
+                            response_body_bytes.clone()
+                        }
+                    } else {
+                        response_body_bytes.clone()
+                    };
+
+                    let body_string = String::from_utf8_lossy(&log_body_bytes);
+                    debug!(request_id = request_id, response_status = %response_status, response_body = %body_string, "<<<");
+                }
+
                 if response_status.is_success() || response_status.is_redirection() || response_status.is_client_error() {
-                    let (mut parts, body) = response.into_parts();
-                    let response_body_bytes = body.collect().await.map_err(ProxyError::Hyper)?.to_bytes();
-                    debug!(request_id = request_id, response_status = %response_status, response_body = ?response_body_bytes);
                     info!(request_id = request_id, "Successfully proxied to {} - Status: {}", target_uri_hyper, response_status);
                     parts.headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
                     return Ok(Response::from_parts(parts, Full::new(response_body_bytes)));

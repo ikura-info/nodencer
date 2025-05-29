@@ -9,6 +9,7 @@ bytes = "1.6.0" # Added for body manipulation
 clap = { version = "4.0", features = ["derive"] }
 dashmap = "7.0.0-rc2" # For concurrent HashMap (sticky IP)
 eyre = "0.6.12"
+flate2 = "1.0" # Added for decompression support
 http-body-util = "0.1.1" # Added for Hyper 1.x body utilities
 hyper = { version = "1.6.0", features = ["full"] }
 hyper-tls = "0.6.0" # For HTTPS client
