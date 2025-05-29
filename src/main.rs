@@ -79,7 +79,7 @@ async fn handle_request(
             if let Some(idx) = ip_map_entry.get(&prefix_string) {
                 *idx
             } else {
-                let idx = rand::thread_rng().gen_range(0..num_backends);
+                let idx = rand::rng().random_range(0..num_backends);
                 ip_map_entry.insert(prefix_string.clone(), idx); // Clone prefix_string for insertion
                 idx
             }

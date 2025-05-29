@@ -10,12 +10,11 @@ hyper-tls = "0.5" # For HTTPS client
 clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
-rand = "0.8"
-dashmap = "5.5" # For concurrent HashMap (sticky IP)
+rand = { version = "0.9", features = ["thread_rng"] }
+dashmap = "7.0.0-rc2" # For concurrent HashMap (sticky IP)
 tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2.3"
-futures-util = "0.3.31"
 eyre = "0.6.12"
 
 [profile.release]
