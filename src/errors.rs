@@ -1,5 +1,5 @@
 use std::fmt;
-use hyper::{StatusCode, Response};
+use hyper::{StatusCode, Response, header::HeaderValue};
 use http_body_util::Full;
 use bytes::Bytes;
 
@@ -99,14 +99,18 @@ pub fn error_to_response(err: &ProxyError) -> Response<Full<Bytes>> {
         ProxyError::RequestBodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         ProxyError::ClientIpParseError => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    Response::builder()
+
+    let mut response = Response::builder()
         .status(status)
         .body(Full::new(Bytes::from(err.to_string())))
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|_| { // Basic fallback
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Full::new(Bytes::from("Error generating error response")))
+                .header("Access-Control-Allow-Origin", "*")
+                .body(Full::new(Bytes::from("Internal server error")))
                 .unwrap()
-        })
+        });
+    response.headers_mut().insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
+    response
 }
 
