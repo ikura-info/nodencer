@@ -16,7 +16,7 @@ pub struct CliArgs {
     #[clap(short, long, value_enum, default_value_t = Strategy::RoundRobin)]
     pub strategy: Strategy,
 
-    #[clap(short, long, value_parser, default_value = "127.0.0.1:3000")]
+    #[clap(short, long, value_parser, default_value = "127.0.0.1:8541")]
     pub listen_address: SocketAddr,
 }
 
