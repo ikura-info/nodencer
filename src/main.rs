@@ -14,7 +14,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::server::conn::auto::Builder as ServerBuilder;
-use hyper::body::{Body as HttpBody, Incoming as IncomingBody};
+use hyper::body::{Incoming as IncomingBody};
 use http_body_util::{BodyExt, Full};
 use bytes::Bytes;
 use hyper::{Request, Response, Uri};
@@ -56,7 +56,7 @@ async fn handle_request(
         return Err(ProxyError::NoBackendsForPrefix(prefix_string.clone()));
     }
 
-    let body_bytes = req.into_body().collect().await.map_err(|e| ProxyError::Hyper(e))?.to_bytes();
+    let body_bytes = req.into_body().collect().await.map_err(ProxyError::Hyper)?.to_bytes();
 
     let client_ip = remote_addr.ip();
     let num_backends = backend_group.endpoints.len();
@@ -72,7 +72,7 @@ async fn handle_request(
             if let Some(idx) = ip_map_entry.get(&prefix_string) {
                 *idx
             } else {
-                let idx = rand::thread_rng().gen_range(0..num_backends);
+                let idx = rand::rng().random_range(0..num_backends);
                 ip_map_entry.insert(prefix_string.clone(), idx);
                 idx
             }
@@ -102,7 +102,7 @@ async fn handle_request(
                 if response.status().is_success() || response.status().is_redirection() || response.status().is_client_error() {
                     tracing::info!("Successfully proxied to {} - Status: {}", target_uri_hyper, response.status());
                     let (mut parts, body) = response.into_parts();
-                    let body_bytes = body.collect().await.map_err(|e| ProxyError::Hyper(e))?.to_bytes();
+                    let body_bytes = body.collect().await.map_err(ProxyError::Hyper)?.to_bytes();
                     parts.headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
                     return Ok(Response::from_parts(parts, Full::new(body_bytes)));
                 } else {
