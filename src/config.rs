@@ -10,7 +10,7 @@ use url::Url; // Use url::Url for validated backend URLs
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct CliArgs {
-    #[clap(short, long, value_parser, default_value = "config.yaml")]
+    #[clap(short, long, value_parser)]
     pub config: PathBuf,
 
     #[clap(short, long, value_enum, default_value_t = Strategy::RoundRobin)]
