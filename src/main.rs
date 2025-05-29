@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::Parser;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -25,6 +26,9 @@ use rand::Rng;
 use url::Url;
 
 use eyre::{Result, bail};
+use tracing::{info, warn, error, debug};
+
+static REQUEST_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 struct AppState {
@@ -39,11 +43,12 @@ async fn handle_request(
     state: AppState,
     remote_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, ProxyError> {
+    let request_id = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let method = req.method().clone();
     let uri = req.uri().clone();
     let headers = req.headers().clone();
 
-    tracing::info!("Incoming request: {} {} from {}", method, uri, remote_addr);
+    info!(request_id = request_id, "Incoming request: {} {} from {}", method, uri, remote_addr);
 
     let path_str = uri.path().to_string();
     let (prefix_slice, downstream_path_slice) = extract_prefix_and_downstream_path(&path_str)?;
@@ -57,6 +62,10 @@ async fn handle_request(
     }
 
     let body_bytes = req.into_body().collect().await.map_err(ProxyError::Hyper)?.to_bytes();
+
+    if method == hyper::Method::POST {
+        debug!(request_id = request_id, request_body = ?body_bytes);
+    }
 
     let client_ip = remote_addr.ip();
     let num_backends = backend_group.endpoints.len();
@@ -85,14 +94,14 @@ async fn handle_request(
         let backend_base_url = &backend_group.endpoints[*backend_idx];
         let target_uri_hyper = build_target_uri(backend_base_url, downstream_path_slice, uri.query())?;
 
-        tracing::debug!("Attempting to proxy to backend #{}: {}", backend_idx, target_uri_hyper);
+        debug!(request_id = request_id, "Attempting to proxy to backend #{}: {}", backend_idx, target_uri_hyper);
 
         let mut backend_req_builder = Request::builder()
             .method(method.clone())
             .uri(target_uri_hyper.clone());
 
         let mut backend_headers = headers.clone();
-        backend_headers.remove(hyper::header::HOST); // Remove original Host header
+        backend_headers.remove(hyper::header::HOST);
 
         *backend_req_builder.headers_mut().unwrap() = backend_headers;
 
@@ -102,26 +111,29 @@ async fn handle_request(
 
         match state.client.request(backend_req).await {
             Ok(response) => {
-                if response.status().is_success() || response.status().is_redirection() || response.status().is_client_error() {
-                    tracing::info!("Successfully proxied to {} - Status: {}", target_uri_hyper, response.status());
+                let response_status = response.status();
+                if response_status.is_success() || response_status.is_redirection() || response_status.is_client_error() {
                     let (mut parts, body) = response.into_parts();
-                    let body_bytes = body.collect().await.map_err(ProxyError::Hyper)?.to_bytes();
+                    let response_body_bytes = body.collect().await.map_err(ProxyError::Hyper)?.to_bytes();
+                    debug!(request_id = request_id, response_status = %response_status, response_body = ?response_body_bytes);
+                    info!(request_id = request_id, "Successfully proxied to {} - Status: {}", target_uri_hyper, response_status);
                     parts.headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
-                    return Ok(Response::from_parts(parts, Full::new(body_bytes)));
+                    return Ok(Response::from_parts(parts, Full::new(response_body_bytes)));
                 } else {
-                    tracing::warn!(
+                    warn!(
+                        request_id = request_id,
                         "Backend {} returned error status: {}. Trying next if available.",
                         target_uri_hyper,
-                        response.status()
+                        response_status
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to connect to backend {}: {}. Trying next if available.", target_uri_hyper, e);
+                warn!(request_id = request_id, "Failed to connect to backend {}: {}. Trying next if available.", target_uri_hyper, e);
             }
         }
     }
-
+    error!(request_id = request_id, "All backends failed for prefix: {}, attempts: {}", prefix_string, num_backends);
     Err(ProxyError::AllBackendsFailed{ prefix: prefix_string, attempts: num_backends })
 }
 
@@ -158,29 +170,29 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli_args = CliArgs::parse();
-    tracing::info!("Starting proxy with CLI args: {:?}", cli_args);
+    info!("Starting proxy with CLI args: {:?}", cli_args);
 
     let raw_config = load_config(&cli_args.config)
         .map_err(|e| {
-            tracing::error!("Failed to load config: {}", e);
+            error!("Failed to load config: {}", e);
             e
         })?;
 
     let backend_groups_map = process_config(raw_config)
         .map_err(|e| {
-            tracing::error!("Failed to process config: {}", e);
+            error!("Failed to process config: {}", e);
             e
         })?;
     let backend_groups = Arc::new(backend_groups_map);
 
     if backend_groups.is_empty() {
-        tracing::error!("No backend groups loaded from config. Exiting.");
+        error!("No backend groups loaded from config. Exiting.");
         bail!("No backends configured");
     }
 
-    tracing::info!("Loaded {} backend groups: {:?}", backend_groups.len(), backend_groups.keys());
+    info!("Loaded {} backend groups: {:?}", backend_groups.len(), backend_groups.keys());
     for group in backend_groups.values() {
-        tracing::info!(" - Prefix '{}': {} endpoints", group.prefix, group.endpoints.len());
+        info!(" - Prefix '{}': {} endpoints", group.prefix, group.endpoints.len());
     }
 
     let https = HttpsConnector::new();
@@ -194,7 +206,7 @@ async fn main() -> Result<()> {
     };
 
     let listener = tokio::net::TcpListener::bind(cli_args.listen_address).await?;
-    tracing::info!("Proxy server listening on http://{}", cli_args.listen_address);
+    info!("Proxy server listening on http://{}", cli_args.listen_address);
 
     loop {
         let (stream, remote_addr) = listener.accept().await?;
@@ -208,7 +220,7 @@ async fn main() -> Result<()> {
                     match handle_request(req, state, remote_addr).await {
                         Ok(response) => Ok::<_, Infallible>(response),
                         Err(proxy_error) => {
-                            tracing::error!("Error processing request from {}: {}", remote_addr.ip(), proxy_error);
+                            error!("Error processing request from {}: {}", remote_addr.ip(), proxy_error);
                             Ok::<_, Infallible>(error_to_response(&proxy_error))
                         }
                     }
@@ -219,7 +231,7 @@ async fn main() -> Result<()> {
                 .serve_connection(io, service)
                 .await
             {
-                tracing::error!("Error serving connection: {}", err);
+                error!("Error serving connection: {}", err);
             }
         });
     }
