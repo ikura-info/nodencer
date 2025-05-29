@@ -100,11 +100,14 @@ pub fn error_to_response(err: &ProxyError) -> Response<Body> {
     Response::builder()
         .status(status)
         .header("Content-Type", "text/plain")
+        .header("Access-Control-Allow-Origin", "*")
         .body(Body::from(err.to_string()))
         .unwrap_or_else(|_| {
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("Access-Control-Allow-Origin", "*")
                 .body(Body::from("Error building error response"))
                 .unwrap()
         })
 }
+

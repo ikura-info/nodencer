@@ -15,6 +15,7 @@ use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, service_fn};
 // Removed unused Method import
 use hyper::{Body, Request, Response, Server, Client, Uri};
+use hyper::header::HeaderValue; // Added for CORS
 use hyper_tls::HttpsConnector;
 use dashmap::DashMap;
 use rand::Rng; // Rng trait is sufficient for gen_range
@@ -110,7 +111,9 @@ async fn handle_request(
             Ok(response) => {
                 if response.status().is_success() || response.status().is_redirection() || response.status().is_client_error() {
                     tracing::info!("Successfully proxied to {} - Status: {}", target_uri_hyper, response.status());
-                    return Ok(response);
+                    let (mut parts, body) = response.into_parts();
+                    parts.headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
+                    return Ok(Response::from_parts(parts, body));
                 } else {
                     tracing::warn!(
                         "Backend {} returned error status: {}. Trying next if available.",
@@ -228,3 +231,4 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
