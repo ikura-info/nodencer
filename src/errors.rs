@@ -1,5 +1,7 @@
 use std::fmt;
-use hyper::{StatusCode, Response, Body};
+use hyper::{StatusCode, Response};
+use http_body_util::Full;
+use bytes::Bytes;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -83,7 +85,7 @@ impl From<url::ParseError> for ProxyError {
 
 
 // Helper to convert ProxyError to an HTTP Response
-pub fn error_to_response(err: &ProxyError) -> Response<Body> {
+pub fn error_to_response(err: &ProxyError) -> Response<Full<Bytes>> {
     let status = match err {
         ProxyError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         ProxyError::ConfigLoad(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -99,14 +101,11 @@ pub fn error_to_response(err: &ProxyError) -> Response<Body> {
     };
     Response::builder()
         .status(status)
-        .header("Content-Type", "text/plain")
-        .header("Access-Control-Allow-Origin", "*")
-        .body(Body::from(err.to_string()))
+        .body(Full::new(Bytes::from(err.to_string())))
         .unwrap_or_else(|_| {
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("Access-Control-Allow-Origin", "*")
-                .body(Body::from("Error building error response"))
+                .body(Full::new(Bytes::from("Error generating error response")))
                 .unwrap()
         })
 }

@@ -1,7 +1,6 @@
 mod config;
 mod errors;
 
-// Removed BackendGroup from here as it's not directly used in main.rs
 use config::{CliArgs, Strategy, BackendGroups, load_config, process_config};
 use errors::{ProxyError, error_to_response};
 
@@ -11,16 +10,19 @@ use std::sync::Arc;
 use std::convert::Infallible;
 
 use clap::Parser;
-use hyper::server::conn::AddrStream;
-use hyper::service::{make_service_fn, service_fn};
-// Removed unused Method import
-use hyper::{Body, Request, Response, Server, Client, Uri};
-use hyper::header::HeaderValue; // Added for CORS
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::server::conn::auto::Builder as ServerBuilder;
+use hyper::body::{Body as HttpBody, Incoming as IncomingBody};
+use http_body_util::{BodyExt, Full};
+use bytes::Bytes;
+use hyper::{Request, Response, Uri};
+use hyper::header::HeaderValue;
 use hyper_tls::HttpsConnector;
 use dashmap::DashMap;
-use rand::Rng; // Rng trait is sufficient for gen_range
+use rand::Rng;
 use url::Url;
-// Removed unused futures_util::future::FutureExt
 
 use eyre::{Result, bail};
 
@@ -29,27 +31,22 @@ struct AppState {
     backend_groups: Arc<BackendGroups>,
     strategy: Strategy,
     sticky_ip_map: Arc<DashMap<IpAddr, HashMap<String, usize>>>,
-    client: Client<HttpsConnector<hyper::client::HttpConnector>>,
+    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>
 }
 
 async fn handle_request(
-    req: Request<Body>, // Removed `mut`
+    req: Request<IncomingBody>,
     state: AppState,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>, ProxyError> {
-    // Clone essential parts of the request first.
+) -> Result<Response<Full<Bytes>>, ProxyError> {
     let method = req.method().clone();
-    let uri = req.uri().clone(); // Cloned hyper::Uri
+    let uri = req.uri().clone();
     let headers = req.headers().clone();
 
     tracing::info!("Incoming request: {} {} from {}", method, uri, remote_addr);
 
-    // Extract path and prefix from the cloned URI's path.
-    // path_str is owned, its slices ('prefix_slice', 'downstream_path_slice') are valid.
     let path_str = uri.path().to_string();
     let (prefix_slice, downstream_path_slice) = extract_prefix_and_downstream_path(&path_str)?;
-
-    // Create an owned String for the prefix, as it's used as a key and in errors.
     let prefix_string = prefix_slice.to_string();
 
     let backend_group = state.backend_groups.get(&prefix_string)
@@ -59,9 +56,7 @@ async fn handle_request(
         return Err(ProxyError::NoBackendsForPrefix(prefix_string.clone()));
     }
 
-    // Now, consume the original request's body. `req` is moved here.
-    let body_bytes = hyper::body::to_bytes(req.into_body()).await
-        .map_err(|_| ProxyError::RequestBodyTooLarge)?;
+    let body_bytes = req.into_body().collect().await.map_err(|e| ProxyError::Hyper(e))?.to_bytes();
 
     let client_ip = remote_addr.ip();
     let num_backends = backend_group.endpoints.len();
@@ -69,18 +64,16 @@ async fn handle_request(
 
     let initial_backend_idx = match state.strategy {
         Strategy::RoundRobin => {
-            // Assumes BackendGroup.rr_counter is Arc<AtomicUsize> (fixed in config.rs)
             let count = backend_group.rr_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             count % num_backends
         }
         Strategy::StickyIp => {
             let mut ip_map_entry = state.sticky_ip_map.entry(client_ip).or_default();
-            // The key in sticky_ip_map is String
             if let Some(idx) = ip_map_entry.get(&prefix_string) {
                 *idx
             } else {
-                let idx = rand::rng().random_range(0..num_backends);
-                ip_map_entry.insert(prefix_string.clone(), idx); // Clone prefix_string for insertion
+                let idx = rand::thread_rng().gen_range(0..num_backends);
+                ip_map_entry.insert(prefix_string.clone(), idx);
                 idx
             }
         }
@@ -88,23 +81,20 @@ async fn handle_request(
 
     attempt_order.rotate_left(initial_backend_idx);
 
-    // Use cloned method, uri (for query), headers for building backend request
     for backend_idx in attempt_order.iter() {
         let backend_base_url = &backend_group.endpoints[*backend_idx];
-        // Pass downstream_path_slice and query from cloned uri
         let target_uri_hyper = build_target_uri(backend_base_url, downstream_path_slice, uri.query())?;
 
         tracing::debug!("Attempting to proxy to backend #{}: {}", backend_idx, target_uri_hyper);
 
         let mut backend_req_builder = Request::builder()
-            .method(method.clone()) // Use cloned method
-            .uri(target_uri_hyper.clone()); // Clone the target_uri for the request
+            .method(method.clone())
+            .uri(target_uri_hyper.clone());
 
-        *backend_req_builder.headers_mut().unwrap() = headers.clone(); // Use cloned headers
-        backend_req_builder.headers_mut().unwrap().remove(hyper::header::HOST);
+        *backend_req_builder.headers_mut().unwrap() = headers.clone();
 
         let backend_req = backend_req_builder
-            .body(Body::from(body_bytes.clone()))
+            .body(Full::new(body_bytes.clone()))
             .expect("Failed to build backend request");
 
         match state.client.request(backend_req).await {
@@ -112,8 +102,9 @@ async fn handle_request(
                 if response.status().is_success() || response.status().is_redirection() || response.status().is_client_error() {
                     tracing::info!("Successfully proxied to {} - Status: {}", target_uri_hyper, response.status());
                     let (mut parts, body) = response.into_parts();
+                    let body_bytes = body.collect().await.map_err(|e| ProxyError::Hyper(e))?.to_bytes();
                     parts.headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
-                    return Ok(Response::from_parts(parts, body));
+                    return Ok(Response::from_parts(parts, Full::new(body_bytes)));
                 } else {
                     tracing::warn!(
                         "Backend {} returned error status: {}. Trying next if available.",
@@ -128,9 +119,8 @@ async fn handle_request(
         }
     }
 
-    Err(ProxyError::AllBackendsFailed{ prefix: prefix_string, attempts: num_backends }) // Use owned prefix_string
+    Err(ProxyError::AllBackendsFailed{ prefix: prefix_string, attempts: num_backends })
 }
-
 
 fn extract_prefix_and_downstream_path(path: &str) -> Result<(&str, &str), ProxyError> {
     if !path.starts_with('/') {
@@ -160,7 +150,6 @@ fn build_target_uri(backend_base_url: &Url, downstream_path: &str, query: Option
     Uri::try_from(target_url.as_str()).map_err(ProxyError::UriParse)
 }
 
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -187,13 +176,12 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("Loaded {} backend groups: {:?}", backend_groups.len(), backend_groups.keys());
-    // Reverted to iterating over values for this log, it's cleaner.
     for group in backend_groups.values() {
         tracing::info!(" - Prefix '{}': {} endpoints", group.prefix, group.endpoints.len());
     }
 
     let https = HttpsConnector::new();
-    let client = Client::builder().build::<_, Body>(https);
+    let client = Client::builder(TokioExecutor::new()).build(https);
 
     let app_state = AppState {
         backend_groups,
@@ -202,33 +190,35 @@ async fn main() -> Result<()> {
         client,
     };
 
-    let make_svc = make_service_fn(move |conn: &AddrStream| {
-        let state = app_state.clone();
-        let remote_addr = conn.remote_addr();
-        async move {
-            Ok::<_, Infallible>(service_fn(move |req_hyper| { // Renamed req to req_hyper to avoid confusion
-                let state = state.clone();
+    let listener = tokio::net::TcpListener::bind(cli_args.listen_address).await?;
+    tracing::info!("Proxy server listening on http://{}", cli_args.listen_address);
+
+    loop {
+        let (stream, remote_addr) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let state_clone = app_state.clone();
+
+        tokio::task::spawn(async move {
+            let service = hyper::service::service_fn(move |req: Request<IncomingBody>| {
+                let state = state_clone.clone();
                 async move {
-                    match handle_request(req_hyper, state, remote_addr).await {
-                        Ok(response) => Ok::<_, Infallible>(response), // Annotated Ok
+                    match handle_request(req, state, remote_addr).await {
+                        Ok(response) => Ok::<_, Infallible>(response),
                         Err(proxy_error) => {
                             tracing::error!("Error processing request from {}: {}", remote_addr.ip(), proxy_error);
-                            Ok::<_, Infallible>(error_to_response(&proxy_error)) // Annotated Ok
+                            Ok::<_, Infallible>(error_to_response(&proxy_error))
                         }
                     }
                 }
-            }))
-        }
-    });
+            });
 
-    let server = Server::bind(&cli_args.listen_address).serve(make_svc);
-    tracing::info!("Proxy server listening on http://{}", cli_args.listen_address);
-
-    server.await.map_err(|e| {
-        tracing::error!("Server error: {}", e);
-        e // Convert hyper::Error into eyre::Report
-    })?;
-
-    Ok(())
+            if let Err(err) = ServerBuilder::new(TokioExecutor::new())
+                .serve_connection(io, service)
+                .await
+            {
+                tracing::error!("Error serving connection: {}", err);
+            }
+        });
+    }
 }
 
