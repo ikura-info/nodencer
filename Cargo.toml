@@ -1,5 +1,5 @@
 [package]
-name = "dummy-node-balancer"
+name = "nodencer"
 version = "0.1.0"
 edition = "2021"
 
