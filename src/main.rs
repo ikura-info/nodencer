@@ -91,7 +91,10 @@ async fn handle_request(
             .method(method.clone())
             .uri(target_uri_hyper.clone());
 
-        *backend_req_builder.headers_mut().unwrap() = headers.clone();
+        let mut backend_headers = headers.clone();
+        backend_headers.remove(hyper::header::HOST); // Remove original Host header
+
+        *backend_req_builder.headers_mut().unwrap() = backend_headers;
 
         let backend_req = backend_req_builder
             .body(Full::new(body_bytes.clone()))
