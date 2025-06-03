@@ -6,16 +6,34 @@ use std::io::Read;
 
 /// Decodes the body bytes for logging purposes based on the Content-Encoding header.
 pub fn decode_body_for_logging(body: &[u8], headers: &HeaderMap) -> Bytes {
-    if let Some(content_encoding) = headers.get(CONTENT_ENCODING) {
-        if content_encoding == "gzip" {
-            let mut decoder = GzDecoder::new(&body[..]);
-            let mut decompressed = Vec::new();
-            if decoder.read_to_end(&mut decompressed).is_ok() {
-                return Bytes::from(decompressed);
+    if let Some(content_encoding_hv) = headers.get(CONTENT_ENCODING) {
+        if let Ok(content_encoding_str) = content_encoding_hv.to_str() {
+            // Normalize to lowercase for robust matching
+            match content_encoding_str.to_lowercase().as_str() {
+                "gzip" => {
+                    let mut decoder = GzDecoder::new(body);
+                    let mut decompressed = Vec::new();
+                    if decoder.read_to_end(&mut decompressed).is_ok() {
+                        return Bytes::from(decompressed);
+                    }
+                },
+                "br" => {
+                    // Brotli decompression
+                    // brotli::Decompressor takes a reader and a buffer size
+                    let mut reader = brotli::Decompressor::new(body, 4096 /* buffer size */);
+                    let mut decompressed = Vec::new();
+                    if reader.read_to_end(&mut decompressed).is_ok() {
+                        return Bytes::from(decompressed);
+                    }
+                },
+                // "deflate" => { /* ... deflate decompression ... */ }
+                _ => {
+                    // Unknown or unsupported encoding, fall through to original body
+                }
             }
         }
     }
-    // Fallback to original body if no gzip encoding or on error
+    // Fallback to original body if no recognized encoding, or on decompression error
     Bytes::from(body.to_vec())
 }
 

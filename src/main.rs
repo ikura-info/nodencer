@@ -21,7 +21,7 @@ use hyper::body::{Incoming as IncomingBody};
 use http_body_util::{BodyExt, Full};
 use bytes::Bytes;
 use hyper::{Request, Response, Uri};
-use hyper::header::HeaderValue;
+use hyper::header::{HeaderValue, CONTENT_ENCODING};
 use hyper_tls::HttpsConnector;
 use dashmap::DashMap;
 use rand::Rng;
@@ -121,7 +121,16 @@ async fn handle_request(
                 if tracing::enabled!(tracing::Level::DEBUG) && method == hyper::Method::POST {
                     let log_body_bytes = decode_body_for_logging(&response_body_bytes, &parts.headers);
                     let body_string = String::from_utf8_lossy(&log_body_bytes);
-                    debug!(request_id = request_id, response_status = %response_status, response_body = %body_string, "<<<");
+                    let encoding = parts.headers.get(CONTENT_ENCODING).cloned().unwrap_or_else(|| HeaderValue::from_static("none"));
+                    let content_type = parts.headers.get(hyper::header::CONTENT_TYPE).cloned().unwrap_or_else(|| HeaderValue::from_static("none"));
+                    debug!(
+                        request_id = request_id,
+                        response_status = %response_status,
+                        encoding = ?encoding,
+                        content_type = ?content_type,
+                        response_body = %body_string,
+                        "<<<"
+                    );
                 }
 
                 if response_status.is_success() || response_status.is_redirection() || response_status.is_client_error() {

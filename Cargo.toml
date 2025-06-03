@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bytes = "1.6.0" # Added for body manipulation
+brotli = "8"
 clap = { version = "4.0", features = ["derive"] }
 dashmap = "7.0.0-rc2" # For concurrent HashMap (sticky IP)
 eyre = "0.6.12"
