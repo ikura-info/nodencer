@@ -1,8 +1,10 @@
 mod config;
 mod errors;
+mod body_decoder;
 
 use config::{CliArgs, Strategy, BackendGroups, load_config, process_config};
 use errors::{ProxyError, error_to_response};
+use body_decoder::decode_body_for_logging;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -24,10 +26,6 @@ use hyper_tls::HttpsConnector;
 use dashmap::DashMap;
 use rand::Rng;
 use url::Url;
-
-use flate2::read::GzDecoder;
-use std::io::Read;
-
 use eyre::{Result, bail};
 use tracing::{info, warn, error, debug};
 
@@ -121,23 +119,7 @@ async fn handle_request(
 
                 // Only decompress for logging if debug is enabled, preserve original response
                 if tracing::enabled!(tracing::Level::DEBUG) && method == hyper::Method::POST {
-                    let log_body_bytes = if let Some(content_encoding) = parts.headers.get(hyper::header::CONTENT_ENCODING) {
-                        if content_encoding == "gzip" {
-                            let mut decoder = GzDecoder::new(&response_body_bytes[..]);
-                            let mut decompressed = Vec::new();
-                            if decoder.read_to_end(&mut decompressed).is_ok() {
-                                Bytes::from(decompressed)
-                            } else {
-                                // If decompression fails, use original bytes
-                                response_body_bytes.clone()
-                            }
-                        } else {
-                            response_body_bytes.clone()
-                        }
-                    } else {
-                        response_body_bytes.clone()
-                    };
-
+                    let log_body_bytes = decode_body_for_logging(&response_body_bytes, &parts.headers);
                     let body_string = String::from_utf8_lossy(&log_body_bytes);
                     debug!(request_id = request_id, response_status = %response_status, response_body = %body_string, "<<<");
                 }
